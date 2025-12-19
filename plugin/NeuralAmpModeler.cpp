@@ -1,6 +1,7 @@
 #include <algorithm> // std::clamp, std::min
 #include <cmath> // pow
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <utility>
 
@@ -69,6 +70,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 : iplug::Plugin(info, MakeConfig(kNumParams, kNumPresets))
 {
   _InitToneStack();
+  _LoadDirectoryPreferences();
   //nam::activations::Activation::enable_fast_tanh();
   GetParam(kInputLevel)->InitGain("Input", 0.0, -20.0, 20.0, 0.1);
   GetParam(kToneBass)->InitDouble("Bass", 5.0, 0.0, 10.0, 0.1);
@@ -213,12 +215,14 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 #endif
     pGraphics->AttachControl(new NAMFileBrowserControl(modelArea, kMsgTagClearModel, defaultNamFileString.c_str(),
                                                        "nam", loadModelCompletionHandler, style, fileSVG, crossSVG,
-                                                       leftArrowSVG, rightArrowSVG, fileBackgroundBitmap),
+                                                       leftArrowSVG, rightArrowSVG, fileBackgroundBitmap,
+                                                       mLastNAMDirectory.Get()),
                              kCtrlTagModelFileBrowser);
     pGraphics->AttachControl(new ISVGSwitchControl(irSwitchArea, {irIconOffSVG, irIconOnSVG}, kIRToggle));
     pGraphics->AttachControl(
       new NAMFileBrowserControl(irArea, kMsgTagClearIR, defaultIRString.c_str(), "wav", loadIRCompletionHandler, style,
-                                fileSVG, crossSVG, leftArrowSVG, rightArrowSVG, fileBackgroundBitmap),
+                                fileSVG, crossSVG, leftArrowSVG, rightArrowSVG, fileBackgroundBitmap,
+                                mLastIRDirectory.Get()),
       kCtrlTagIRFileBrowser);
     pGraphics->AttachControl(
       new NAMSwitchControl(ngToggleArea, kNoiseGateActive, "Noise Gate", style, switchHandleBitmap));
@@ -240,6 +244,12 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
     // The meters
     pGraphics->AttachControl(new NAMMeterControl(inputMeterArea, meterBackgroundBitmap, style), kCtrlTagInputMeter);
     pGraphics->AttachControl(new NAMMeterControl(outputMeterArea, meterBackgroundBitmap, style), kCtrlTagOutputMeter);
+
+    // CPU usage monitor - centered between title and knobs
+    // Title is 50px, knobs start at 75px (50 + 25 gap), so place monitor in that 25px gap
+    const auto monitorY = contentArea.T + titleHeight + 2.5f;  // Start 2.5px below title
+    const auto usageMonitorArea = IRECT(contentArea.MW() - 57.5f, monitorY, contentArea.MW() + 57.5f, monitorY + 20.0f);
+    pGraphics->AttachControl(new NAMUsageMonitorControl(usageMonitorArea), kCtrlTagUsageMonitor);
 
     // Settings/help/about box
     pGraphics->AttachControl(new NAMCircleButtonControl(
@@ -388,6 +398,25 @@ void NeuralAmpModeler::OnIdle()
       pGraphics->GetControlWithTag(kCtrlTagOutNorm)->SetDisabled(!mModel->HasLoudness());
 
     mNewModelLoadedInDSP = false;
+  }
+
+  // Update CPU usage monitor (once per second)
+  mCpuIdleCounter++;
+  if (mCpuIdleCounter >= 30)
+  {
+    mCpuIdleCounter = 0;
+    mCpuLoad = _GetProcessCpuUsage();
+    mCpuLoadSmoothed = mCpuLoadSmoothed + kSmoothingFactor * (mCpuLoad - mCpuLoadSmoothed);
+
+    if (auto* pGraphics = GetUI())
+    {
+      if (auto* pMonitor = pGraphics->GetControlWithTag(kCtrlTagUsageMonitor))
+      {
+        auto* monitor = pMonitor->As<NAMUsageMonitorControl>();
+        monitor->SetCpuLoad(static_cast<float>(mCpuLoadSmoothed));
+        monitor->SetGPUActive(mModel != nullptr && mModel->IsGPU());
+      }
+    }
   }
 }
 
@@ -654,6 +683,10 @@ std::string NeuralAmpModeler::_StageModel(const WDL_String& modelPath)
     temp->Reset(GetSampleRate(), GetBlockSize());
     mStagedModel = std::move(temp);
     mNAMPath = modelPath;
+    // Save the directory for next time
+    mLastNAMDirectory = modelPath;
+    mLastNAMDirectory.remove_filepart();
+    _SaveDirectoryPreferences();
     SendControlMsgFromDelegate(kCtrlTagModelFileBrowser, kMsgTagLoadedModel, mNAMPath.GetLength(), mNAMPath.Get());
   }
   catch (std::runtime_error& e)
@@ -695,6 +728,10 @@ dsp::wav::LoadReturnCode NeuralAmpModeler::_StageIR(const WDL_String& irPath)
   if (wavState == dsp::wav::LoadReturnCode::SUCCESS)
   {
     mIRPath = irPath;
+    // Save the directory for next time
+    mLastIRDirectory = irPath;
+    mLastIRDirectory.remove_filepart();
+    _SaveDirectoryPreferences();
     SendControlMsgFromDelegate(kCtrlTagIRFileBrowser, kMsgTagLoadedIR, mIRPath.GetLength(), mIRPath.Get());
   }
   else
@@ -925,4 +962,126 @@ void NeuralAmpModeler::_UpdateMeters(sample** inputPointer, sample** outputPoint
   const int nChansHack = 1;
   mInputSender.ProcessBlock(inputPointer, (int)nFrames, kCtrlTagInputMeter, nChansHack);
   mOutputSender.ProcessBlock(outputPointer, (int)nFrames, kCtrlTagOutputMeter, nChansHack);
+}
+
+WDL_String NeuralAmpModeler::_GetPreferencesPath() const
+{
+  WDL_String path;
+  DesktopPath(path);
+  // Go up from Desktop to user home, then to Application Support
+  path.remove_filepart();
+  path.Append("/Library/Application Support/NeuralAmpModeler/");
+  return path;
+}
+
+void NeuralAmpModeler::_SaveDirectoryPreferences()
+{
+  WDL_String prefsPath = _GetPreferencesPath();
+
+  // Create directory if it doesn't exist
+  std::filesystem::create_directories(prefsPath.Get());
+
+  prefsPath.Append("preferences.txt");
+
+  std::ofstream file(prefsPath.Get());
+  if (file.is_open())
+  {
+    file << "NAMDir=" << mLastNAMDirectory.Get() << std::endl;
+    file << "IRDir=" << mLastIRDirectory.Get() << std::endl;
+    file << "NAMFile=" << mNAMPath.Get() << std::endl;
+    file << "IRFile=" << mIRPath.Get() << std::endl;
+    file.close();
+  }
+}
+
+void NeuralAmpModeler::_LoadDirectoryPreferences()
+{
+  WDL_String prefsPath = _GetPreferencesPath();
+  prefsPath.Append("preferences.txt");
+
+  WDL_String savedNAMFile, savedIRFile;
+
+  std::ifstream file(prefsPath.Get());
+  if (file.is_open())
+  {
+    std::string line;
+    while (std::getline(file, line))
+    {
+      if (line.rfind("NAMDir=", 0) == 0)
+      {
+        mLastNAMDirectory.Set(line.substr(7).c_str());
+      }
+      else if (line.rfind("IRDir=", 0) == 0)
+      {
+        mLastIRDirectory.Set(line.substr(6).c_str());
+      }
+      else if (line.rfind("NAMFile=", 0) == 0)
+      {
+        savedNAMFile.Set(line.substr(8).c_str());
+      }
+      else if (line.rfind("IRFile=", 0) == 0)
+      {
+        savedIRFile.Set(line.substr(7).c_str());
+      }
+    }
+    file.close();
+  }
+
+  // Load the saved model and IR if they exist
+  if (savedNAMFile.GetLength() > 0 && std::filesystem::exists(savedNAMFile.Get()))
+  {
+    _StageModel(savedNAMFile);
+  }
+  if (savedIRFile.GetLength() > 0 && std::filesystem::exists(savedIRFile.Get()))
+  {
+    _StageIR(savedIRFile);
+  }
+}
+
+double NeuralAmpModeler::_GetProcessCpuUsage()
+{
+  // Get this process's CPU time
+  mach_port_t task = mach_task_self();
+  task_thread_times_info_data_t threadTimesInfo;
+  mach_msg_type_number_t count = TASK_THREAD_TIMES_INFO_COUNT;
+
+  if (task_info(task, TASK_THREAD_TIMES_INFO, (task_info_t)&threadTimesInfo, &count) != KERN_SUCCESS)
+  {
+    return 0.0;
+  }
+
+  // Convert to microseconds
+  uint64_t userTime = threadTimesInfo.user_time.seconds * 1000000ULL + threadTimesInfo.user_time.microseconds;
+  uint64_t systemTime = threadTimesInfo.system_time.seconds * 1000000ULL + threadTimesInfo.system_time.microseconds;
+  uint64_t totalCpuTime = userTime + systemTime;
+
+  auto now = std::chrono::steady_clock::now();
+
+  if (!mCpuCheckInitialized)
+  {
+    mPrevUserTime = userTime;
+    mPrevSystemTime = systemTime;
+    mPrevCpuCheckTime = now;
+    mCpuCheckInitialized = true;
+    return 0.0;
+  }
+
+  // Calculate elapsed wall time in microseconds
+  auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - mPrevCpuCheckTime).count();
+  if (elapsed == 0)
+  {
+    return 0.0;
+  }
+
+  // Calculate CPU time used since last check
+  uint64_t cpuTimeDiff = (userTime - mPrevUserTime) + (systemTime - mPrevSystemTime);
+
+  mPrevUserTime = userTime;
+  mPrevSystemTime = systemTime;
+  mPrevCpuCheckTime = now;
+
+  // CPU usage = CPU time used / wall time elapsed
+  // This gives usage as a fraction of one core; clamp to 1.0 for display
+  double usage = static_cast<double>(cpuTimeDiff) / static_cast<double>(elapsed);
+  return std::min(1.0, usage);
 }

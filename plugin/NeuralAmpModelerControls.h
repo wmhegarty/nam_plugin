@@ -203,7 +203,8 @@ class NAMFileBrowserControl : public IDirBrowseControlBase
 public:
   NAMFileBrowserControl(const IRECT& bounds, int clearMsgTag, const char* labelStr, const char* fileExtension,
                         IFileDialogCompletionHandlerFunc ch, const IVStyle& style, const ISVG& loadSVG,
-                        const ISVG& clearSVG, const ISVG& leftSVG, const ISVG& rightSVG, const IBitmap& bitmap)
+                        const ISVG& clearSVG, const ISVG& leftSVG, const ISVG& rightSVG, const IBitmap& bitmap,
+                        const char* initialDirectory = nullptr)
   : IDirBrowseControlBase(bounds, fileExtension, false, false)
   , mClearMsgTag(clearMsgTag)
   , mDefaultLabelStr(labelStr)
@@ -216,6 +217,10 @@ public:
   , mRightSVG(rightSVG)
   {
     mIgnoreMouse = true;
+    if (initialDirectory && strlen(initialDirectory) > 0)
+    {
+      mInitialDirectory.Set(initialDirectory);
+    }
   }
 
   void Draw(IGraphics& g) override { g.DrawFittedBitmap(mBitmap, mRECT); }
@@ -382,11 +387,20 @@ private:
   void GetSelectedFileDirectory(WDL_String& path)
   {
     GetSelectedFile(path);
-    path.remove_filepart();
+    if (path.GetLength() > 0)
+    {
+      path.remove_filepart();
+    }
+    else if (mInitialDirectory.GetLength() > 0)
+    {
+      // Use saved initial directory if no file is selected
+      path = mInitialDirectory;
+    }
     return;
   }
 
   WDL_String mDefaultLabelStr;
+  WDL_String mInitialDirectory;
   IFileDialogCompletionHandlerFunc mCompletionHandlerFunc;
   NAMFileNameControl* mFileNameControl = nullptr;
   IVStyle mStyle;
@@ -557,4 +571,68 @@ private:
   IVStyle mStyle;
   int mAnimationTime = 200;
   bool mWillHide = false;
+};
+
+// CPU Usage Monitor Control with GPU indicator
+class NAMUsageMonitorControl : public IControl
+{
+public:
+  NAMUsageMonitorControl(const IRECT& bounds)
+  : IControl(bounds)
+  {
+  }
+
+  void Draw(IGraphics& g) override
+  {
+    const float padding = 4.0f;
+    const float gpuIndicatorWidth = 32.0f;
+    const float labelWidth = 28.0f;
+    const float barWidth = mRECT.W() - padding * 3 - labelWidth - gpuIndicatorWidth;
+
+    // Background
+    g.FillRoundRect(IColor(180, 20, 20, 20), mRECT, 4.0f);
+
+    // GPU indicator area (left side)
+    IRECT gpuArea = mRECT.GetPadded(-padding).GetFromLeft(gpuIndicatorWidth);
+
+    // Draw GPU indicator
+    IColor gpuColor = mIsGPU ? IColor(255, 80, 200, 80) : IColor(150, 100, 100, 100);
+    IText gpuText(9.0f, gpuColor, "Roboto-Regular", EAlign::Center, EVAlign::Middle);
+    g.DrawText(gpuText, "GPU", gpuArea);
+
+    // CPU bar area (right side)
+    IRECT rightArea = mRECT.GetPadded(-padding).GetFromRight(mRECT.W() - padding * 2 - gpuIndicatorWidth);
+    IRECT cpuLabelArea = rightArea.GetFromLeft(labelWidth);
+    IRECT cpuBarArea = rightArea.GetFromRight(barWidth);
+
+    // Draw label
+    IText labelText(10.0f, COLOR_WHITE, "Roboto-Regular", EAlign::Near, EVAlign::Middle);
+    g.DrawText(labelText, "CPU", cpuLabelArea);
+
+    // Draw CPU bar background
+    g.FillRoundRect(IColor(100, 40, 40, 40), cpuBarArea, 2.0f);
+    // Draw CPU bar fill
+    float cpuFill = std::min(1.0f, mCpuLoad);
+    if (cpuFill > 0.0f)
+    {
+      IColor cpuColor = cpuFill > 0.8f ? IColor(255, 255, 80, 80) :
+                        cpuFill > 0.5f ? IColor(255, 255, 200, 80) :
+                                         IColor(255, 80, 200, 80);
+      IRECT cpuFillRect = cpuBarArea.GetFromLeft(cpuBarArea.W() * cpuFill);
+      g.FillRoundRect(cpuColor, cpuFillRect, 2.0f);
+    }
+
+    // Draw percentage text
+    IText percentText(9.0f, COLOR_WHITE, "Roboto-Regular", EAlign::Far, EVAlign::Middle);
+    char cpuStr[16];
+    snprintf(cpuStr, sizeof(cpuStr), "%.0f%%", mCpuLoad * 100.0f);
+    g.DrawText(percentText, cpuStr, cpuBarArea.GetPadded(-2.0f));
+  }
+
+  void SetCpuLoad(float load) { mCpuLoad = load; SetDirty(false); }
+  void SetGPUActive(bool active) { mIsGPU = active; SetDirty(false); }
+
+private:
+  float mCpuLoad = 0.0f;
+  bool mIsGPU = false;
 };

@@ -8,8 +8,12 @@
 #include "ToneStack.h"
 
 #include "IPlug_include_in_plug_hdr.h"
+#include "IPlugPaths.h"
 #include "ISender.h"
 #include <NAM/dsp.h>
+#include <chrono>
+#include <mach/mach.h>
+#include <mach/task_info.h>
 
 const int kNumPresets = 1;
 // The plugin is mono inside
@@ -52,6 +56,7 @@ enum ECtrlTags
   kCtrlTagOutputMeter,
   kCtrlTagSettingsBox,
   kCtrlTagOutNorm,
+  kCtrlTagUsageMonitor,
   kNumCtrlTags
 };
 
@@ -148,6 +153,9 @@ public:
 
   // So that we can let the world know if we're resampling (useful for debugging)
   double GetEncapsulatedSampleRate() const { return GetNAMSampleRate(mEncapsulated); };
+
+  // Check if the encapsulated model is using GPU processing
+  bool IsGPU() const override { return mEncapsulated->IsGPU(); };
 
 private:
   bool NeedToResample() const { return GetExpectedSampleRate() != GetEncapsulatedSampleRate(); };
@@ -279,6 +287,15 @@ private:
   // Path to IR (.wav file)
   WDL_String mIRPath;
 
+  // Last used directories for file browsers
+  WDL_String mLastNAMDirectory;
+  WDL_String mLastIRDirectory;
+
+  // Directory preferences persistence
+  void _SaveDirectoryPreferences();
+  void _LoadDirectoryPreferences();
+  WDL_String _GetPreferencesPath() const;
+
   WDL_String mHighLightColor{PluginColors::NAM_THEMECOLOR.ToColorCode()};
 
   std::unordered_map<std::string, double> mNAMParams = {{"Input", 0.0}, {"Output", 0.0}};
@@ -286,4 +303,17 @@ private:
   NAMSender mInputSender, mOutputSender;
 
   std::vector<NAM_SAMPLE> mIntermediateIn, mIntermediateOut;
+
+  // CPU usage monitoring
+  double mCpuLoad = 0.0;
+  double mCpuLoadSmoothed = 0.0;
+  int mCpuIdleCounter = 0;
+  static constexpr double kSmoothingFactor = 0.1; // Lower = smoother (0.0-1.0)
+
+  // Process CPU tracking
+  uint64_t mPrevUserTime = 0;
+  uint64_t mPrevSystemTime = 0;
+  std::chrono::steady_clock::time_point mPrevCpuCheckTime;
+  bool mCpuCheckInitialized = false;
+  double _GetProcessCpuUsage();
 };
