@@ -291,9 +291,13 @@ private:
   WDL_String mLastNAMDirectory;
   WDL_String mLastIRDirectory;
 
-  // Directory preferences persistence
-  void _SaveDirectoryPreferences();
-  void _LoadDirectoryPreferences();
+  // Window scale persistence
+  float mSavedWindowScale = 1.0f;
+  float mLastAppliedScale = 1.0f;
+
+  // Preferences persistence
+  void _SavePreferences();
+  void _LoadPreferences();
   WDL_String _GetPreferencesPath() const;
 
   WDL_String mHighLightColor{PluginColors::NAM_THEMECOLOR.ToColorCode()};

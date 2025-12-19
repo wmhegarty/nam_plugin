@@ -70,7 +70,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 : iplug::Plugin(info, MakeConfig(kNumParams, kNumPresets))
 {
   _InitToneStack();
-  _LoadDirectoryPreferences();
+  _LoadPreferences();
   //nam::activations::Activation::enable_fast_tanh();
   GetParam(kInputLevel)->InitGain("Input", 0.0, -20.0, 20.0, 0.1);
   GetParam(kToneBass)->InitDouble("Bass", 5.0, 0.0, 10.0, 0.1);
@@ -416,6 +416,15 @@ void NeuralAmpModeler::OnIdle()
         monitor->SetCpuLoad(static_cast<float>(mCpuLoadSmoothed));
         monitor->SetGPUActive(mModel != nullptr && mModel->IsGPU());
       }
+
+      // Check if window scale has changed and save it
+      float currentScale = pGraphics->GetDrawScale();
+      if (std::abs(currentScale - mLastAppliedScale) > 0.01f)
+      {
+        mLastAppliedScale = currentScale;
+        mSavedWindowScale = currentScale;
+        _SavePreferences();
+      }
     }
   }
 }
@@ -465,6 +474,20 @@ int NeuralAmpModeler::UnserializeState(const IByteChunk& chunk, int startPos)
 void NeuralAmpModeler::OnUIOpen()
 {
   Plugin::OnUIOpen();
+
+  // Apply saved window scale if different from default
+  if (auto* pGraphics = GetUI())
+  {
+    if (mSavedWindowScale != 1.0f)
+    {
+      pGraphics->Resize(PLUG_WIDTH, PLUG_HEIGHT, mSavedWindowScale);
+      mLastAppliedScale = mSavedWindowScale;
+    }
+    else
+    {
+      mLastAppliedScale = pGraphics->GetDrawScale();
+    }
+  }
 
   if (mNAMPath.GetLength())
   {
@@ -686,7 +709,7 @@ std::string NeuralAmpModeler::_StageModel(const WDL_String& modelPath)
     // Save the directory for next time
     mLastNAMDirectory = modelPath;
     mLastNAMDirectory.remove_filepart();
-    _SaveDirectoryPreferences();
+    _SavePreferences();
     SendControlMsgFromDelegate(kCtrlTagModelFileBrowser, kMsgTagLoadedModel, mNAMPath.GetLength(), mNAMPath.Get());
   }
   catch (std::runtime_error& e)
@@ -731,7 +754,7 @@ dsp::wav::LoadReturnCode NeuralAmpModeler::_StageIR(const WDL_String& irPath)
     // Save the directory for next time
     mLastIRDirectory = irPath;
     mLastIRDirectory.remove_filepart();
-    _SaveDirectoryPreferences();
+    _SavePreferences();
     SendControlMsgFromDelegate(kCtrlTagIRFileBrowser, kMsgTagLoadedIR, mIRPath.GetLength(), mIRPath.Get());
   }
   else
@@ -974,7 +997,7 @@ WDL_String NeuralAmpModeler::_GetPreferencesPath() const
   return path;
 }
 
-void NeuralAmpModeler::_SaveDirectoryPreferences()
+void NeuralAmpModeler::_SavePreferences()
 {
   WDL_String prefsPath = _GetPreferencesPath();
 
@@ -990,11 +1013,12 @@ void NeuralAmpModeler::_SaveDirectoryPreferences()
     file << "IRDir=" << mLastIRDirectory.Get() << std::endl;
     file << "NAMFile=" << mNAMPath.Get() << std::endl;
     file << "IRFile=" << mIRPath.Get() << std::endl;
+    file << "WindowScale=" << mSavedWindowScale << std::endl;
     file.close();
   }
 }
 
-void NeuralAmpModeler::_LoadDirectoryPreferences()
+void NeuralAmpModeler::_LoadPreferences()
 {
   WDL_String prefsPath = _GetPreferencesPath();
   prefsPath.Append("preferences.txt");
@@ -1022,6 +1046,13 @@ void NeuralAmpModeler::_LoadDirectoryPreferences()
       else if (line.rfind("IRFile=", 0) == 0)
       {
         savedIRFile.Set(line.substr(7).c_str());
+      }
+      else if (line.rfind("WindowScale=", 0) == 0)
+      {
+        mSavedWindowScale = static_cast<float>(std::stod(line.substr(12)));
+        // Clamp to reasonable range
+        if (mSavedWindowScale < 0.5f) mSavedWindowScale = 0.5f;
+        if (mSavedWindowScale > 4.0f) mSavedWindowScale = 4.0f;
       }
     }
     file.close();

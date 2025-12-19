@@ -65,3 +65,80 @@ endif ()
 if (WIN32)
     set(CMAKE_RC_FLAGS "/I${PROJECT_DIR}/resources /I${PROJECT_DIR}/resources/fonts /I${PROJECT_DIR}/resources/img ${CMAKE_RC_FLAGS}")
 endif ()
+
+# Embed GPU Audio libraries for self-contained distribution (macOS)
+if (CMAKE_SYSTEM_NAME MATCHES "Darwin")
+    # Define source paths for GPU libraries
+    set(GPU_AUDIO_ENGINE_PATH "/Library/Application Support/GPU Audio/LTS/v2/engine")
+    # Use generator expression for multi-config builds (Xcode)
+    set(GPU_PROCESSOR_PATH "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+
+    # Embed libraries in app bundle
+    add_custom_command(TARGET app POST_BUILD
+        COMMENT "Embedding GPU Audio libraries in app bundle..."
+        # Create MacOS directory for libraries (same as executable)
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:app>/Contents/MacOS"
+        # Copy GPU Audio engine
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_AUDIO_ENGINE_PATH}/libgpu_audio.dylib"
+            "$<TARGET_BUNDLE_DIR:app>/Contents/MacOS/"
+        # Copy NAM processor library
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_PROCESSOR_PATH}/libnam_processor.so"
+            "$<TARGET_BUNDLE_DIR:app>/Contents/MacOS/"
+        # Copy NAM processor Metal library
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_PROCESSOR_PATH}/libnam_processor.arm64.metallib"
+            "$<TARGET_BUNDLE_DIR:app>/Contents/MacOS/"
+        # Sign embedded libraries for local execution
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:app>/Contents/MacOS/libgpu_audio.dylib"
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:app>/Contents/MacOS/libnam_processor.so"
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:app>/Contents/MacOS/libnam_processor.arm64.metallib"
+    )
+
+    # Embed libraries in AU plugin bundle
+    add_custom_command(TARGET auv2 POST_BUILD
+        COMMENT "Embedding GPU Audio libraries in AU bundle..."
+        # Create MacOS directory for libraries
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:auv2>/Contents/MacOS"
+        # Copy GPU Audio engine
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_AUDIO_ENGINE_PATH}/libgpu_audio.dylib"
+            "$<TARGET_BUNDLE_DIR:auv2>/Contents/MacOS/"
+        # Copy NAM processor library
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_PROCESSOR_PATH}/libnam_processor.so"
+            "$<TARGET_BUNDLE_DIR:auv2>/Contents/MacOS/"
+        # Copy NAM processor Metal library
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_PROCESSOR_PATH}/libnam_processor.arm64.metallib"
+            "$<TARGET_BUNDLE_DIR:auv2>/Contents/MacOS/"
+        # Sign embedded libraries for local execution
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:auv2>/Contents/MacOS/libgpu_audio.dylib"
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:auv2>/Contents/MacOS/libnam_processor.so"
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:auv2>/Contents/MacOS/libnam_processor.arm64.metallib"
+    )
+
+    # Embed libraries in VST3 plugin bundle
+    add_custom_command(TARGET vst3 POST_BUILD
+        COMMENT "Embedding GPU Audio libraries in VST3 bundle..."
+        # Create MacOS directory for libraries
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:vst3>/Contents/MacOS"
+        # Copy GPU Audio engine
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_AUDIO_ENGINE_PATH}/libgpu_audio.dylib"
+            "$<TARGET_BUNDLE_DIR:vst3>/Contents/MacOS/"
+        # Copy NAM processor library
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_PROCESSOR_PATH}/libnam_processor.so"
+            "$<TARGET_BUNDLE_DIR:vst3>/Contents/MacOS/"
+        # Copy NAM processor Metal library
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${GPU_PROCESSOR_PATH}/libnam_processor.arm64.metallib"
+            "$<TARGET_BUNDLE_DIR:vst3>/Contents/MacOS/"
+        # Sign embedded libraries for local execution
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:vst3>/Contents/MacOS/libgpu_audio.dylib"
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:vst3>/Contents/MacOS/libnam_processor.so"
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:vst3>/Contents/MacOS/libnam_processor.arm64.metallib"
+    )
+endif ()
