@@ -43,6 +43,16 @@ enum EParams
   kEQActive,
   kOutNorm,
   kIRToggle,
+  // Preset navigation (automatable) - increment/decrement triggers
+  kNAMPrev,
+  kNAMNext,
+  kIRPrev,
+  kIRNext,
+  // Read-only filename display parameters (for host querying)
+  kNAMName,
+  kIRName,
+  kRackspace,  // User-assignable rackspace ID (1-16)
+  kSlot,  // User-assignable slot number (1-16) - set once per plugin instance, saved with project
   kNumParams
 };
 
@@ -172,6 +182,27 @@ private:
   std::function<void(NAM_SAMPLE**, NAM_SAMPLE**, int)> mBlockProcessFunc;
 };
 
+// MIDI CC numbers for controls
+// Knobs (continuous controllers)
+constexpr int kMidiCCInput = 12;           // CC 12: Input level
+constexpr int kMidiCCNoiseGate = 13;       // CC 13: Noise gate threshold
+constexpr int kMidiCCBass = 14;            // CC 14: Bass
+constexpr int kMidiCCMid = 15;             // CC 15: Mid
+constexpr int kMidiCCTreble = 16;          // CC 16: Treble
+constexpr int kMidiCCOutput = 17;          // CC 17: Output level
+
+// Preset navigation (trigger on value > 63)
+constexpr int kMidiCCNAMPrev = 20;         // CC 20: Previous NAM model
+constexpr int kMidiCCNAMNext = 21;         // CC 21: Next NAM model
+constexpr int kMidiCCIRPrev = 22;          // CC 22: Previous IR
+constexpr int kMidiCCIRNext = 23;          // CC 23: Next IR
+
+// Toggles (trigger on value > 63)
+constexpr int kMidiCCNoiseGateToggle = 24; // CC 24: Noise gate on/off
+constexpr int kMidiCCEQToggle = 25;        // CC 25: EQ (tone stack) on/off
+constexpr int kMidiCCIRToggle = 26;        // CC 26: IR on/off
+constexpr int kMidiCCNormalize = 27;       // CC 27: Output normalize on/off
+
 class NeuralAmpModeler final : public iplug::Plugin
 {
 public:
@@ -179,6 +210,7 @@ public:
   ~NeuralAmpModeler();
 
   void ProcessBlock(iplug::sample** inputs, iplug::sample** outputs, int nFrames) override;
+  void ProcessMidiMsg(const iplug::IMidiMsg& msg) override;
   void OnReset() override;
   void OnIdle() override;
 
@@ -300,6 +332,24 @@ private:
   void _LoadPreferences();
   WDL_String _GetPreferencesPath() const;
 
+  // Directory navigation for MIDI control
+  void _ScanNAMDirectory();
+  void _ScanIRDirectory();
+  void _NavigateNAM(int direction);  // -1 = prev, +1 = next
+  void _NavigateIR(int direction);   // -1 = prev, +1 = next
+  std::vector<std::string> mNAMFiles;
+  std::vector<std::string> mIRFiles;
+  int mCurrentNAMIndex = -1;
+  int mCurrentIRIndex = -1;
+  bool mNAMDirectoryScanned = false;
+  bool mIRDirectoryScanned = false;
+
+  // Current filenames without extension (for host querying)
+  WDL_String mCurrentNAMName;
+  WDL_String mCurrentIRName;
+  void _UpdateFilenameParms();
+  static std::string _GetFilenameWithoutExtension(const char* path);
+
   WDL_String mHighLightColor{PluginColors::NAM_THEMECOLOR.ToColorCode()};
 
   std::unordered_map<std::string, double> mNAMParams = {{"Input", 0.0}, {"Output", 0.0}};
@@ -320,4 +370,9 @@ private:
   std::chrono::steady_clock::time_point mPrevCpuCheckTime;
   bool mCpuCheckInitialized = false;
   double _GetProcessCpuUsage();
+
+  // Unique instance ID for state file (based on memory address)
+  std::string mInstanceId;
+  void _WriteStateFile();
+  void _DeleteStateFile();
 };

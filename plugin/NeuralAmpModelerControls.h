@@ -536,14 +536,16 @@ public:
     AddChildControl(new IURLControl(IRECT(), "www.neuralampmodeler.com", "https://www.neuralampmodeler.com", text,
                                     COLOR_TRANSPARENT, PluginColors::HELP_TEXT_MO, PluginColors::HELP_TEXT_CLICKED));
 
-    //    AddChildControl(new IVColorSwatchControl(IRECT() , "Highlight", [&](int idx, IColor color){
-    //
-    //      WDL_String colorCodeStr;
-    //      color.ToColorCodeStr(colorCodeStr, false);
-    //      this->GetDelegate()->SendArbitraryMsgFromUI(kMsgTagHighlightColor, kNoTag, colorCodeStr.GetLength(),
-    //      colorCodeStr.Get());
-    //
-    //    }, mStyle, IVColorSwatchControl::ECellLayout::kHorizontal, {kFG}, {""}));
+    // Rackspace and Slot number selectors for GigPerformer integration
+    const auto slotText = IText(DEFAULT_TEXT_SIZE, EAlign::Center, PluginColors::HELP_TEXT);
+    const auto slotLabelStyle = mStyle.WithDrawFrame(false).WithValueText(slotText);
+    AddChildControl(new IVLabelControl(IRECT(), "Rackspace:", slotLabelStyle));
+
+    const auto numStyle = mStyle.WithShowLabel(false).WithShowValue(true).WithValueText(IText(14.f, COLOR_WHITE));
+    AddChildControl(new IVNumberBoxControl(IRECT(), kRackspace, nullptr, "", numStyle, true, 1.0, 1.0, 16.0, "%0.0f", false));
+
+    AddChildControl(new IVLabelControl(IRECT(), "Slot:", slotLabelStyle));
+    AddChildControl(new IVNumberBoxControl(IRECT(), kSlot, nullptr, "", numStyle, true, 1.0, 1.0, 16.0, "%0.0f", false));
 
     OnResize();
   }
@@ -561,7 +563,12 @@ public:
       GetChild(3)->SetTargetAndDrawRECTs(titleLabel.GetVShifted(titleLabel.H() + 20).GetMidVPadded(5));
       GetChild(4)->SetTargetAndDrawRECTs(titleLabel.GetVShifted(titleLabel.H() + 40).GetMidVPadded(7));
       GetChild(5)->SetTargetAndDrawRECTs(titleLabel.GetVShifted(titleLabel.H() + 60).GetMidVPadded(7));
-      //      GetChild(6)->SetTargetAndDrawRECTs(content.GetFromBRHC(100, 50));
+      // Rackspace and Slot controls at bottom
+      const auto rackspaceLabelArea = titleLabel.GetVShifted(titleLabel.H() + 90).GetMidVPadded(7);
+      GetChild(6)->SetTargetAndDrawRECTs(rackspaceLabelArea.GetFromLeft(rackspaceLabelArea.W() * 0.35f));
+      GetChild(7)->SetTargetAndDrawRECTs(rackspaceLabelArea.GetFromLeft(rackspaceLabelArea.W() * 0.5f).GetFromRight(50).GetCentredInside(50, 25));
+      GetChild(8)->SetTargetAndDrawRECTs(rackspaceLabelArea.GetFromRight(rackspaceLabelArea.W() * 0.35f).GetFromLeft(rackspaceLabelArea.W() * 0.15f));
+      GetChild(9)->SetTargetAndDrawRECTs(rackspaceLabelArea.GetFromRight(50).GetCentredInside(50, 25));
     }
   }
 

@@ -3,6 +3,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <mutex>
+#include <sstream>
 #include <utility>
 
 #include "Colors.h"
@@ -69,6 +72,11 @@ EMsgBoxResult _ShowMessageBox(iplug::igraphics::IGraphics* pGraphics, const char
 NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 : iplug::Plugin(info, MakeConfig(kNumParams, kNumPresets))
 {
+  // Generate unique instance ID from memory address
+  std::stringstream ss;
+  ss << std::hex << reinterpret_cast<uintptr_t>(this);
+  mInstanceId = ss.str();
+
   _InitToneStack();
   _LoadPreferences();
   //nam::activations::Activation::enable_fast_tanh();
@@ -82,6 +90,35 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
   GetParam(kEQActive)->InitBool("ToneStack", true);
   GetParam(kOutNorm)->InitBool("OutNorm", true);
   GetParam(kIRToggle)->InitBool("IRToggle", true);
+  // NAM and IR navigation parameters for host automation (trigger when value goes to 1)
+  GetParam(kNAMPrev)->InitBool("NAM Prev", false);
+  GetParam(kNAMNext)->InitBool("NAM Next", false);
+  GetParam(kIRPrev)->InitBool("IR Prev", false);
+  GetParam(kIRNext)->InitBool("IR Next", false);
+
+  // Read-only filename display parameters (for host querying like GigPerformer)
+  // These use a dummy double 0-1 range but display the filename via DisplayFunc
+  GetParam(kNAMName)->InitDouble("NAM Name", 0.0, 0.0, 1.0, 0.01);
+  GetParam(kNAMName)->SetDisplayFunc([this](double, WDL_String& str) {
+    if (mCurrentNAMName.GetLength() > 0)
+      str.Set(mCurrentNAMName.Get());
+    else
+      str.Set("(no model)");
+    std::cerr << "NAM DisplayFunc called, returning: " << str.Get() << std::endl;
+  });
+  GetParam(kIRName)->InitDouble("IR Name", 0.0, 0.0, 1.0, 0.01);
+  GetParam(kIRName)->SetDisplayFunc([this](double, WDL_String& str) {
+    if (mCurrentIRName.GetLength() > 0)
+      str.Set(mCurrentIRName.Get());
+    else
+      str.Set("(no IR)");
+    std::cerr << "IR DisplayFunc called, returning: " << str.Get() << std::endl;
+  });
+
+  // Rackspace and slot parameters - read these in GP Script to match with state file
+  // Note: Hosts normalize to 0.0-1.0, so GP Script must denormalize: value = 1 + normalizedValue * 15
+  GetParam(kRackspace)->InitInt("Rackspace", 1, 1, 16);
+  GetParam(kSlot)->InitInt("Slot", 1, 1, 16);
 
   mNoiseGateTrigger.AddListener(&mNoiseGateGain);
 
@@ -166,6 +203,8 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 
     // Misc Areas
     const auto settingsButtonArea = mainArea.GetFromTRHC(50, 50).GetCentredInside(20, 20);
+    // Slot number control - small number box to the left of settings button
+    const auto slotArea = settingsButtonArea.GetHShifted(-35).GetScaledAboutCentre(1.5f);
 
     // Model loader button
     auto loadModelCompletionHandler = [&](const WDL_String& fileName, const WDL_String& path) {
@@ -272,6 +311,7 @@ NeuralAmpModeler::NeuralAmpModeler(const InstanceInfo& info)
 
 NeuralAmpModeler::~NeuralAmpModeler()
 {
+  _DeleteStateFile();
   _DeallocateIOPointers();
 }
 
@@ -385,6 +425,9 @@ void NeuralAmpModeler::OnReset()
   _ResetModelAndIR(sampleRate, GetBlockSize());
   mToneStack->Reset(sampleRate, maxBlockSize);
   _UpdateLatency();
+
+  // Register this instance and update the instance number parameter
+  _WriteStateFile();
 }
 
 void NeuralAmpModeler::OnIdle()
@@ -516,6 +559,35 @@ void NeuralAmpModeler::OnParamChange(int paramIdx)
     case kToneBass: mToneStack->SetParam("bass", GetParam(paramIdx)->Value()); break;
     case kToneMid: mToneStack->SetParam("middle", GetParam(paramIdx)->Value()); break;
     case kToneTreble: mToneStack->SetParam("treble", GetParam(paramIdx)->Value()); break;
+    case kNAMPrev:
+      if (GetParam(kNAMPrev)->Bool())
+      {
+        _NavigateNAM(-1);
+        // Reset the parameter back to false
+        GetParam(kNAMPrev)->Set(0.0);
+      }
+      break;
+    case kNAMNext:
+      if (GetParam(kNAMNext)->Bool())
+      {
+        _NavigateNAM(+1);
+        GetParam(kNAMNext)->Set(0.0);
+      }
+      break;
+    case kIRPrev:
+      if (GetParam(kIRPrev)->Bool())
+      {
+        _NavigateIR(-1);
+        GetParam(kIRPrev)->Set(0.0);
+      }
+      break;
+    case kIRNext:
+      if (GetParam(kIRNext)->Bool())
+      {
+        _NavigateIR(+1);
+        GetParam(kIRNext)->Set(0.0);
+      }
+      break;
     default: break;
   }
 }
@@ -706,6 +778,9 @@ std::string NeuralAmpModeler::_StageModel(const WDL_String& modelPath)
     temp->Reset(GetSampleRate(), GetBlockSize());
     mStagedModel = std::move(temp);
     mNAMPath = modelPath;
+    // Update the filename parameter for host querying
+    mCurrentNAMName.Set(_GetFilenameWithoutExtension(modelPath.Get()).c_str());
+    _WriteStateFile();
     // Save the directory for next time
     mLastNAMDirectory = modelPath;
     mLastNAMDirectory.remove_filepart();
@@ -751,6 +826,9 @@ dsp::wav::LoadReturnCode NeuralAmpModeler::_StageIR(const WDL_String& irPath)
   if (wavState == dsp::wav::LoadReturnCode::SUCCESS)
   {
     mIRPath = irPath;
+    // Update the filename parameter for host querying
+    mCurrentIRName.Set(_GetFilenameWithoutExtension(irPath.Get()).c_str());
+    _WriteStateFile();
     // Save the directory for next time
     mLastIRDirectory = irPath;
     mLastIRDirectory.remove_filepart();
@@ -999,14 +1077,24 @@ WDL_String NeuralAmpModeler::_GetPreferencesPath() const
 
 void NeuralAmpModeler::_SavePreferences()
 {
+  // Get the user-assigned rackspace and slot numbers for preferences
+  int rackspace = static_cast<int>(GetParam(kRackspace)->Value());
+  if (rackspace < 1 || rackspace > 16)
+    rackspace = 1;
+  int slot = static_cast<int>(GetParam(kSlot)->Value());
+  if (slot < 1 || slot > 16)
+    slot = 1;
+
   WDL_String prefsPath = _GetPreferencesPath();
 
   // Create directory if it doesn't exist
   std::filesystem::create_directories(prefsPath.Get());
 
-  prefsPath.Append("preferences.txt");
+  // Use rackspace/slot-specific preferences file
+  WDL_String prefsFile = prefsPath;
+  prefsFile.AppendFormatted(64, "prefs_rackspace_%d_slot_%d.txt", rackspace, slot);
 
-  std::ofstream file(prefsPath.Get());
+  std::ofstream file(prefsFile.Get());
   if (file.is_open())
   {
     file << "NAMDir=" << mLastNAMDirectory.Get() << std::endl;
@@ -1020,12 +1108,23 @@ void NeuralAmpModeler::_SavePreferences()
 
 void NeuralAmpModeler::_LoadPreferences()
 {
+  // Get the user-assigned rackspace and slot numbers for preferences
+  int rackspace = static_cast<int>(GetParam(kRackspace)->Value());
+  if (rackspace < 1 || rackspace > 16)
+    rackspace = 1;
+  int slot = static_cast<int>(GetParam(kSlot)->Value());
+  if (slot < 1 || slot > 16)
+    slot = 1;
+
   WDL_String prefsPath = _GetPreferencesPath();
-  prefsPath.Append("preferences.txt");
+
+  // Use rackspace/slot-specific preferences file
+  WDL_String prefsFile = prefsPath;
+  prefsFile.AppendFormatted(64, "prefs_rackspace_%d_slot_%d.txt", rackspace, slot);
 
   WDL_String savedNAMFile, savedIRFile;
 
-  std::ifstream file(prefsPath.Get());
+  std::ifstream file(prefsFile.Get());
   if (file.is_open())
   {
     std::string line;
@@ -1115,4 +1214,325 @@ double NeuralAmpModeler::_GetProcessCpuUsage()
   // This gives usage as a fraction of one core; clamp to 1.0 for display
   double usage = static_cast<double>(cpuTimeDiff) / static_cast<double>(elapsed);
   return std::min(1.0, usage);
+}
+
+void NeuralAmpModeler::ProcessMidiMsg(const IMidiMsg& msg)
+{
+  // Handle MIDI CC messages
+  if (msg.StatusMsg() == IMidiMsg::kControlChange)
+  {
+    int cc = msg.mData1;
+    int value = msg.mData2;
+    double normalized = value / 127.0;  // 0.0 to 1.0
+
+    // Continuous controls (knobs)
+    switch (cc)
+    {
+      case kMidiCCInput:
+      {
+        // Input: -20 to +20 dB
+        double dbValue = -20.0 + normalized * 40.0;
+        GetParam(kInputLevel)->Set(dbValue);
+        SendParameterValueFromAPI(kInputLevel, dbValue, true);
+        return;
+      }
+      case kMidiCCNoiseGate:
+      {
+        // Noise Gate Threshold: -100 to 0 dB
+        double dbValue = -100.0 + normalized * 100.0;
+        GetParam(kNoiseGateThreshold)->Set(dbValue);
+        SendParameterValueFromAPI(kNoiseGateThreshold, dbValue, true);
+        return;
+      }
+      case kMidiCCBass:
+      {
+        // Bass: 0 to 10
+        double eqValue = normalized * 10.0;
+        GetParam(kToneBass)->Set(eqValue);
+        SendParameterValueFromAPI(kToneBass, eqValue, true);
+        return;
+      }
+      case kMidiCCMid:
+      {
+        // Mid: 0 to 10
+        double eqValue = normalized * 10.0;
+        GetParam(kToneMid)->Set(eqValue);
+        SendParameterValueFromAPI(kToneMid, eqValue, true);
+        return;
+      }
+      case kMidiCCTreble:
+      {
+        // Treble: 0 to 10
+        double eqValue = normalized * 10.0;
+        GetParam(kToneTreble)->Set(eqValue);
+        SendParameterValueFromAPI(kToneTreble, eqValue, true);
+        return;
+      }
+      case kMidiCCOutput:
+      {
+        // Output: -40 to +40 dB
+        double dbValue = -40.0 + normalized * 80.0;
+        GetParam(kOutputLevel)->Set(dbValue);
+        SendParameterValueFromAPI(kOutputLevel, dbValue, true);
+        return;
+      }
+    }
+
+    // Trigger controls (buttons) - only trigger on value > 63
+    if (value > 63)
+    {
+      switch (cc)
+      {
+        case kMidiCCNAMPrev:
+          _NavigateNAM(-1);
+          return;
+        case kMidiCCNAMNext:
+          _NavigateNAM(+1);
+          return;
+        case kMidiCCIRPrev:
+          _NavigateIR(-1);
+          return;
+        case kMidiCCIRNext:
+          _NavigateIR(+1);
+          return;
+        case kMidiCCNoiseGateToggle:
+        {
+          bool current = GetParam(kNoiseGateActive)->Bool();
+          GetParam(kNoiseGateActive)->Set(!current);
+          SendParameterValueFromAPI(kNoiseGateActive, !current ? 1.0 : 0.0, true);
+          return;
+        }
+        case kMidiCCEQToggle:
+        {
+          bool current = GetParam(kEQActive)->Bool();
+          GetParam(kEQActive)->Set(!current);
+          SendParameterValueFromAPI(kEQActive, !current ? 1.0 : 0.0, true);
+          return;
+        }
+        case kMidiCCIRToggle:
+        {
+          bool current = GetParam(kIRToggle)->Bool();
+          GetParam(kIRToggle)->Set(!current);
+          SendParameterValueFromAPI(kIRToggle, !current ? 1.0 : 0.0, true);
+          return;
+        }
+        case kMidiCCNormalize:
+        {
+          bool current = GetParam(kOutNorm)->Bool();
+          GetParam(kOutNorm)->Set(!current);
+          SendParameterValueFromAPI(kOutNorm, !current ? 1.0 : 0.0, true);
+          return;
+        }
+      }
+    }
+  }
+}
+
+void NeuralAmpModeler::_ScanNAMDirectory()
+{
+  mNAMFiles.clear();
+  mCurrentNAMIndex = -1;
+
+  if (mLastNAMDirectory.GetLength() == 0)
+    return;
+
+  std::filesystem::path dirPath(mLastNAMDirectory.Get());
+  if (!std::filesystem::exists(dirPath) || !std::filesystem::is_directory(dirPath))
+    return;
+
+  // Scan for .nam files
+  for (const auto& entry : std::filesystem::directory_iterator(dirPath))
+  {
+    if (entry.is_regular_file())
+    {
+      auto ext = entry.path().extension().string();
+      // Convert extension to lowercase for comparison
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+      if (ext == ".nam")
+      {
+        mNAMFiles.push_back(entry.path().string());
+      }
+    }
+  }
+
+  // Sort alphabetically
+  std::sort(mNAMFiles.begin(), mNAMFiles.end());
+
+  // Find current file index if a model is loaded
+  if (mNAMPath.GetLength() > 0)
+  {
+    std::string currentPath = mNAMPath.Get();
+    for (size_t i = 0; i < mNAMFiles.size(); i++)
+    {
+      if (mNAMFiles[i] == currentPath)
+      {
+        mCurrentNAMIndex = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+
+  mNAMDirectoryScanned = true;
+}
+
+void NeuralAmpModeler::_ScanIRDirectory()
+{
+  mIRFiles.clear();
+  mCurrentIRIndex = -1;
+
+  if (mLastIRDirectory.GetLength() == 0)
+    return;
+
+  std::filesystem::path dirPath(mLastIRDirectory.Get());
+  if (!std::filesystem::exists(dirPath) || !std::filesystem::is_directory(dirPath))
+    return;
+
+  // Scan for .wav files
+  for (const auto& entry : std::filesystem::directory_iterator(dirPath))
+  {
+    if (entry.is_regular_file())
+    {
+      auto ext = entry.path().extension().string();
+      // Convert extension to lowercase for comparison
+      std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+      if (ext == ".wav")
+      {
+        mIRFiles.push_back(entry.path().string());
+      }
+    }
+  }
+
+  // Sort alphabetically
+  std::sort(mIRFiles.begin(), mIRFiles.end());
+
+  // Find current file index if an IR is loaded
+  if (mIRPath.GetLength() > 0)
+  {
+    std::string currentPath = mIRPath.Get();
+    for (size_t i = 0; i < mIRFiles.size(); i++)
+    {
+      if (mIRFiles[i] == currentPath)
+      {
+        mCurrentIRIndex = static_cast<int>(i);
+        break;
+      }
+    }
+  }
+
+  mIRDirectoryScanned = true;
+}
+
+void NeuralAmpModeler::_NavigateNAM(int direction)
+{
+  // Rescan if needed
+  if (!mNAMDirectoryScanned || mNAMFiles.empty())
+  {
+    _ScanNAMDirectory();
+  }
+
+  if (mNAMFiles.empty())
+    return;
+
+  // Calculate new index with wrapping
+  if (mCurrentNAMIndex < 0)
+  {
+    mCurrentNAMIndex = (direction > 0) ? 0 : static_cast<int>(mNAMFiles.size()) - 1;
+  }
+  else
+  {
+    mCurrentNAMIndex += direction;
+    if (mCurrentNAMIndex < 0)
+      mCurrentNAMIndex = static_cast<int>(mNAMFiles.size()) - 1;
+    else if (mCurrentNAMIndex >= static_cast<int>(mNAMFiles.size()))
+      mCurrentNAMIndex = 0;
+  }
+
+  // Load the model
+  WDL_String path(mNAMFiles[mCurrentNAMIndex].c_str());
+  _StageModel(path);
+}
+
+void NeuralAmpModeler::_NavigateIR(int direction)
+{
+  // Rescan if needed
+  if (!mIRDirectoryScanned || mIRFiles.empty())
+  {
+    _ScanIRDirectory();
+  }
+
+  if (mIRFiles.empty())
+    return;
+
+  // Calculate new index with wrapping
+  if (mCurrentIRIndex < 0)
+  {
+    mCurrentIRIndex = (direction > 0) ? 0 : static_cast<int>(mIRFiles.size()) - 1;
+  }
+  else
+  {
+    mCurrentIRIndex += direction;
+    if (mCurrentIRIndex < 0)
+      mCurrentIRIndex = static_cast<int>(mIRFiles.size()) - 1;
+    else if (mCurrentIRIndex >= static_cast<int>(mIRFiles.size()))
+      mCurrentIRIndex = 0;
+  }
+
+  // Load the IR
+  WDL_String path(mIRFiles[mCurrentIRIndex].c_str());
+  _StageIR(path);
+}
+
+std::string NeuralAmpModeler::_GetFilenameWithoutExtension(const char* path)
+{
+  if (!path || !*path)
+    return "";
+
+  std::filesystem::path p(path);
+  return p.stem().string();
+}
+
+void NeuralAmpModeler::_WriteStateFile()
+{
+  // Only write if we have at least one name set (avoid overwriting with empty values on startup)
+  if (mCurrentNAMName.GetLength() == 0 && mCurrentIRName.GetLength() == 0)
+    return;
+
+  // Get the user-assigned rackspace and slot numbers
+  int rackspace = static_cast<int>(GetParam(kRackspace)->Value());
+  if (rackspace < 1 || rackspace > 16)
+    rackspace = 1;
+  int slot = static_cast<int>(GetParam(kSlot)->Value());
+  if (slot < 1 || slot > 16)
+    slot = 1;
+
+  // Write to rackspace/slot-specific file: rackspace_1_slot_1.txt, etc.
+  WDL_String statePath = _GetPreferencesPath();
+  std::filesystem::create_directories(statePath.Get());
+
+  WDL_String slotFile = statePath;
+  slotFile.AppendFormatted(64, "rackspace_%d_slot_%d.txt", rackspace, slot);
+
+  std::ofstream stateFile(slotFile.Get());
+  if (stateFile.is_open())
+  {
+    stateFile << "NAM=" << mCurrentNAMName.Get() << std::endl;
+    stateFile << "IR=" << mCurrentIRName.Get() << std::endl;
+    stateFile.close();
+  }
+}
+
+void NeuralAmpModeler::_DeleteStateFile()
+{
+  // Delete the rackspace/slot file for this instance
+  int rackspace = static_cast<int>(GetParam(kRackspace)->Value());
+  if (rackspace < 1 || rackspace > 16)
+    return;
+  int slot = static_cast<int>(GetParam(kSlot)->Value());
+  if (slot < 1 || slot > 16)
+    return;
+
+  WDL_String statePath = _GetPreferencesPath();
+  WDL_String slotFile = statePath;
+  slotFile.AppendFormatted(64, "rackspace_%d_slot_%d.txt", rackspace, slot);
+  std::filesystem::remove(slotFile.Get());
 }
